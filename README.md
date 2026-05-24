@@ -98,9 +98,22 @@ unusual SoC topologies or to add `custom` workload profiles.
 Requires Android NDK (r25+, r27 used in development).
 
 ```bash
-NDK=$ANDROID_HOME/ndk/27.0.12077973
+export ANDROID_NDK=$HOME/Library/Android/sdk/ndk/27.0.12077973
+./build.sh
+```
+
+`build.sh` picks the NDK from `$ANDROID_NDK`, then `$ANDROID_NDK_HOME`,
+then the highest-versioned directory under `$ANDROID_HOME/ndk/`. Options:
+
+```
+./build.sh --soc s5e9955 --abi arm64-v8a --api 30 --clean -j 8
+```
+
+Direct CMake also works:
+
+```bash
 cmake -S . -B build \
-    -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
+    -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
     -DANDROID_ABI=arm64-v8a \
     -DANDROID_PLATFORM=android-30 \
     -DFREQ_CONTROL_SOC=s5e9955
@@ -117,6 +130,17 @@ are enforced by `CMakeLists.txt`.
 ---
 
 ## Verify on device
+
+Quick end-to-end with `run.py` (prints BEFORE / DURING / AFTER clocks
+and verifies that `UnsetClocks()` restored the original values):
+
+```bash
+./run.py -s <SERIAL> -m boost           # hold 5 s
+./run.py -s <SERIAL> -m performance -d 10
+./run.py -s <SERIAL> -m 1001            # by custom id
+```
+
+Or call the binary directly:
 
 ```bash
 adb push build/freq_ctl /data/local/tmp/
