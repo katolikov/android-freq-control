@@ -1,0 +1,391 @@
+# TABNINE.md — Working Guide for the FreqControl Repo
+
+> Audience: an AI coding assistant joining this repo cold. Read this file
+> top-to-bottom *before* touching any code. Every section is load-bearing;
+> do not skip.
+
+---
+
+## 1. What this project is, in one paragraph
+
+FreqControl is a small C++17 static library + CLI (`freq_ctl`) for Android
+that lets a privileged process (root or `system`) (a) pin CPU/GPU/DRAM
+frequencies on a Samsung-Exynos-style device by writing to `sysfs`, and
+(b) pin a thread to a CPU cluster (little/mid/big/prime) using the
+`sched_setaffinity(2)` syscall. Every device-specific value (sysfs paths,
+frequency tables, which CPUs are in which cluster) lives in a single
+per-SoC C++ header generated from a small JSON file. There is **no runtime
+JSON parsing** and **no per-device branching in `.cc` files** — switching
+SoCs is a recompile with `-DFREQ_CONTROL_SOC=<name>`.
+
+---
+
+## 2. Directory map (memorize this)
+
+```
+FreqControl/
+├── CMakeLists.txt              build script - one library + one CLI
+├── .clang-format               Google style, 2-space, 100-col
+├── TABNINE.md                  this file
+├── include/freq_control/       public headers (this is the API surface)
+│   ├── device_config.h         FrequencyMode/CpuCluster/RailTarget/DeviceConfig
+│   ├── freq_controller.h       the FreqController class (4 methods)
+│   └── thread_affinity.h       SetThreadAffinity / ResetThreadAffinity
+├── src/                        implementation (do not include from outside src/)
+│   ├── freq_controller.cc      mode/custom-id pick + save/apply/restore
+│   ├── thread_affinity.cc      cluster-mask build + sched_setaffinity syscall
+│   ├── sysfs_io.{h,cc}         ReadSysfsUint64 / WriteSysfsUint64 / SysfsExists
+│   └── device_config.cc        macro-include of config/soc/<FREQ_CONTROL_SOC>.h
+├── config/soc/                 GENERATED per-SoC headers - do not hand-edit
+│   └── s5e9955.h               example: Samsung Exynos 2500 (Galaxy Z Flip6)
+├── tools/
+│   └── gen_device_config.py    adb-probes a device, emits config/soc/<soc>.h
+├── app/                        CLI binary
+│   └── freq_ctl.cc
+└── build/                      cmake out-of-tree dir (not committed)
+```
+
+**Rule:** any file with `AUTO-GENERATED` in its first line is rewritten by
+`tools/gen_device_config.py`. **Never** hand-edit such a file — re-run the
+generator against the target device instead (see §7).
+
+---
+
+## 3. The four core APIs (this is the user contract, do not change shape)
+
+All in namespace `freq_control`.
+
+```cpp
+class FreqController {
+ public:
+  bool SetFrequencyMode(FrequencyMode mode);   // pick a named profile
+  bool SetFrequencyCustomId(uint32_t id);      // pick a custom-id profile
+  bool SetClocks();                            // save current freqs, apply selected
+  bool UnsetClocks();                          // restore saved freqs
+};
+```
+
+Plus the syscall-based thread-affinity helpers (free functions, same
+namespace):
+
+```cpp
+bool SetThreadAffinity(CpuCluster cluster, pid_t tid = 0);  // 0 = current thread
+bool ResetThreadAffinity(pid_t tid = 0);                    // back to union of all clusters
+```
+
+`FrequencyMode` and `CpuCluster` are scoped enums declared in
+`include/freq_control/device_config.h`:
+
+```cpp
+enum class FrequencyMode : uint32_t {
+  kPowerSave = 0, kBalanced = 1, kPerformance = 2, kBoost = 3, kMaximum = 4,
+};
+
+enum class CpuCluster : uint32_t {
+  kLittle = 0, kMid = 1, kBig = 2, kPrime = 3,
+};
+```
+
+### 3.1 Typical use
+
+```cpp
+#include "freq_control/freq_controller.h"
+#include "freq_control/thread_affinity.h"
+
+using namespace freq_control;
+
+void RunHotLoop() {
+  FreqController ctl;
+  if (!ctl.SetFrequencyMode(FrequencyMode::kBoost)) return;
+  if (!ctl.SetClocks()) return;                  // boost the rails
+  SetThreadAffinity(CpuCluster::kPrime);         // pin THIS thread to prime
+  // ... hot work ...
+  ResetThreadAffinity();
+  ctl.UnsetClocks();                             // restore prior freqs
+}
+```
+
+`~FreqController` auto-calls `UnsetClocks()` if `SetClocks()` was called and
+`UnsetClocks()` was not — so RAII-style use is safe even on early returns.
+
+---
+
+## 4. How a `SetClocks()` actually works (internals you need to know)
+
+For each `RailTarget` in the selected profile:
+
+1. Read current `min_path` and `max_path` values via `ReadSysfsUint64`,
+   save them in `Impl::saved`.
+2. Apply new values via `ApplyRail`:
+   - If new `max_khz < current_min`: write `min_path` first (to a value
+     `<= new_max`), then `max_path`. Otherwise write `max_path` first,
+     then `min_path`. This avoids transient `min > max` states that the
+     kernel rejects.
+3. On any write failure, abort and leave `Impl::saved` populated so
+   `UnsetClocks()` can roll back partial writes.
+
+`min_khz == 0` or `max_khz == 0` in a `RailTarget` means "leave that side
+alone" (the writer skips it). A `nullptr` path means the rail has no node
+on that side (e.g. a write-max-only rail).
+
+---
+
+## 5. Building
+
+### 5.1 Native (host, for compile-checking)
+
+```bash
+cmake -S . -B build/host -DFREQ_CONTROL_SOC=s5e9955
+cmake --build build/host
+```
+
+### 5.2 Android arm64 (the actual target)
+
+Requires Android NDK installed. r25+ is fine, r27 is what was used here.
+
+```bash
+NDK=$ANDROID_HOME/ndk/27.0.12077973           # or wherever your NDK is
+
+cmake -S . -B build \
+  -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a \
+  -DANDROID_PLATFORM=android-30 \
+  -DFREQ_CONTROL_SOC=s5e9955
+
+cmake --build build
+```
+
+Outputs:
+- `build/libfreq_control.a` — link this into your own binary.
+- `build/freq_ctl` — the verification CLI.
+
+### 5.3 Build flags you must keep
+
+`CMakeLists.txt` sets `-Wall -Wextra -Wpedantic -Wshadow -Wconversion
+-Werror`. Do not relax these. If your change triggers a warning, fix the
+code; do not silence the warning.
+
+---
+
+## 6. Testing on a real device
+
+### 6.1 On the read-only device (production, no root)
+
+You can verify *read paths* and the affinity API, but **not** the
+frequency writes (sysfs is `root:root`-or-`root:system` for write).
+
+```bash
+adb push build/freq_ctl /data/local/tmp/
+adb shell chmod +x /data/local/tmp/freq_ctl
+
+# These work without root:
+adb shell /data/local/tmp/freq_ctl list           # dump all profiles
+adb shell /data/local/tmp/freq_ctl probe          # check every sysfs path
+adb shell /data/local/tmp/freq_ctl affinity big   # pin shell to big cluster
+adb shell /data/local/tmp/freq_ctl reset-affinity
+
+# This will print Permission denied per node (expected, not a bug):
+adb shell /data/local/tmp/freq_ctl set performance
+```
+
+### 6.2 On a rooted/userdebug device (full test, the other PC)
+
+Same push, but run as root and exercise the write path:
+
+```bash
+adb root                                # works on userdebug only
+adb push build/freq_ctl /data/local/tmp/
+adb shell chmod +x /data/local/tmp/freq_ctl
+
+# Verify every path is writable AND value lands:
+adb shell /data/local/tmp/freq_ctl probe
+
+# Apply boost for 5 seconds then auto-restore:
+adb shell /data/local/tmp/freq_ctl cycle boost 5
+
+# While the cycle is running, in another shell:
+adb shell cat /sys/devices/system/cpu/cpufreq/policy9/scaling_min_freq
+# Expect: 2304000   (matches kBoost / cpu_prime / min in s5e9955.json)
+adb shell cat /sys/class/devfreq/22200000.sgpu/min_freq
+# Expect: 711000
+```
+
+Important: when **running as root** via `adb shell` you may also need
+`setenforce 0` if SELinux blocks the write — but standard Samsung
+userdebug images allow these nodes to a root caller. If you see
+`Permission denied` while running as root, check SELinux first with
+`getenforce`.
+
+### 6.3 What "good" looks like
+
+After `set performance` on a rooted device, `probe` should still report
+`missing paths: 0` and the freshly-read values should match the
+`performance` row of `freq_ctl list`. After `cycle <mode> <secs>` the
+values should return to whatever they were before the cycle started.
+
+---
+
+## 7. Adding a new device
+
+This is one command. There is no JSON to write.
+
+### Step 1. Connect the device and grab its serial
+
+```bash
+adb devices
+# -> example output:
+# R5CY71BJJ9D    device
+SERIAL=R5CY71BJJ9D
+```
+
+### Step 2. Probe the device and emit the header
+
+```bash
+python3 tools/gen_device_config.py --adb-serial $SERIAL -o config/soc/<soc>.h
+```
+
+The script picks `<soc>` itself (from `ro.soc.model`, falling back to
+`ro.hardware`, sanitised into a C identifier). If you pass the wrong
+output filename the build will fail — name the header to match the SoC
+the script prints on its first line of output (e.g. `s5e9955.h`).
+
+What it does, exactly:
+
+1. Reads `ro.soc.model` (or `ro.hardware`). Sanitises it into a C
+   identifier — this becomes the SoC name, the C++ namespace, and the
+   filename you must give to `-o`.
+2. Enumerates `/sys/devices/system/cpu/cpufreq/policy*`, reads each
+   policy's `related_cpus` and `scaling_available_frequencies`, sorts
+   policies by max freq, and assigns cluster labels:
+   - 1 policy → `little`
+   - 2 policies → `little`, `big`
+   - 3 policies → `little`, `big`, `prime`
+   - 4 policies → `little`, `mid`, `big`, `prime`
+   - more → the script aborts (extend `_CLUSTER_LABELS_BY_COUNT` first).
+3. Looks for a `*sgpu*` and `*mif*` entry under `/sys/class/devfreq/`.
+   For each, prefers `scaling_devfreq_{min,max}` (Samsung's
+   system-writable variant) when present, else `min_freq`/`max_freq`.
+4. Synthesises the five named modes from each rail's sorted
+   `scaling_available_frequencies` by picking entries at fixed
+   percentiles:
+
+   | mode          | min %ile | max %ile |
+   | ------------- | -------- | -------- |
+   | `power_save`  | 0        | 40       |
+   | `balanced`    | 0        | 65       |
+   | `performance` | 45       | 90       |
+   | `boost`       | 65       | 100      |
+   | `maximum`     | 100      | 100      |
+
+   Values are *index-picked* from the kernel's own table, so the kernel
+   will always accept them.
+5. Writes the header. The header is the source of truth for that SoC.
+   Re-run the script whenever the device's tables change; do not
+   hand-edit the file.
+
+The script does **not** synthesise `custom` profiles — those are
+workload-specific. The C++ side (`SetFrequencyCustomId`) still works;
+to populate it for a new device, hand-add entries to the generated
+header (it is a `constexpr` table) **or** extend the script.
+
+### Step 3. Build with the new SoC
+
+```bash
+cmake -S . -B build/<soc> \
+  -DCMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake \
+  -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30 \
+  -DFREQ_CONTROL_SOC=<soc>
+cmake --build build/<soc>
+```
+
+You do **not** need to touch `src/device_config.cc` or `CMakeLists.txt`.
+The `-DFREQ_CONTROL_SOC=<soc>` flag is consumed by
+`src/device_config.cc` via macros that stringify and `#include
+soc/<soc>.h`.
+
+### Step 4. Verify on the new device
+
+```bash
+adb push build/<soc>/freq_ctl /data/local/tmp/
+adb shell /data/local/tmp/freq_ctl probe        # must end with "missing paths: 0"
+adb shell /data/local/tmp/freq_ctl list
+adb shell /data/local/tmp/freq_ctl affinity prime
+```
+
+If `probe` reports any missing paths, the device exposes nodes the
+heuristics did not find. Extend `probe_device()` in the script and
+re-run; do not hand-edit the generated header.
+
+---
+
+## 8. Coding rules (so your patches actually land)
+
+1. **C++17. No exceptions.** This is a system-level lib; errors return
+   `bool` and log to stderr via `std::fprintf`. Do not throw.
+2. **No allocation in the hot path** beyond what's already there
+   (`Impl::saved` is reserved up front).
+3. **2-space indent, 100-col limit.** Run `clang-format -i` on any file
+   you touch.
+4. **Naming:** classes `PascalCase`, methods `PascalCase`, locals
+   `snake_case`, constants `kCamelCase`, file scope `snake_case.cc/.h`,
+   `kFoo` for module-level constants, member variables end with `_`.
+5. **Header guards** of the form `FREQ_CONTROL_<PATH>_H_`.
+6. **Includes:** group system first, then `freq_control/...`, then
+   `"local.h"`. `.clang-format` will sort within groups.
+7. **Do not** add a `using namespace` at file scope.
+8. **Do not** introduce a third-party dependency. The library links only
+   against the C/C++ runtime.
+9. **Do not** add comments that explain *what* the code does (the names
+   should). Comments are reserved for *why* something non-obvious is
+   needed (e.g. write-order invariant in `ApplyRail`).
+10. **Do not** hand-edit anything under `config/soc/`. Regenerate.
+
+---
+
+## 9. Common failure modes and what they mean
+
+| Symptom                                                        | Cause                                          | Fix                                                                    |
+| -------------------------------------------------------------- | ---------------------------------------------- | ---------------------------------------------------------------------- |
+| `open(...) failed: Permission denied`                          | not running as a user with write access        | run as root on a userdebug device, or via a system service             |
+| `sched_setaffinity(...) failed: Invalid argument`              | requested cluster contains an invalid CPU id   | `cpu_clusters` in JSON is wrong; cross-check with `related_cpus`       |
+| `probe` reports `missing paths: N`                             | a path in the JSON does not exist on this SoC  | re-run Step 1 of §7, fix the JSON, regenerate                          |
+| build error `FREQ_CONTROL_SOC must be defined ...`             | forgot the cmake `-D` flag                     | add `-DFREQ_CONTROL_SOC=<soc>` to the cmake configure step             |
+| build error `static_assert / no member 'kDeviceConfig' in ...` | `<soc>.h` namespace name does not match `<soc>`| `soc` field in JSON must equal the file basename and the C++ namespace |
+| `set <mode>` writes succeed but `cat` shows unchanged value    | governor or thermal driver is overriding       | check `scaling_governor` and any vendor `pmqos` driver                 |
+
+---
+
+## 10. Things you must NOT do
+
+- Do not call `SetClocks()` on multiple `FreqController` instances at the
+  same time from a single process. Each instance keeps its own
+  saved-state snapshot; concurrent calls would race on the same sysfs
+  nodes. Use one controller per process.
+- Do not invent new `FrequencyMode` values. If a profile does not fit
+  one of the five names, use a `custom` id instead.
+- Do not write to `/sys/devices/system/cpu/cpufreq/policy*/scaling_setspeed`
+  to set a single frequency — on Samsung Exynos that node is
+  `<unsupported>`. The supported pin is `scaling_min_freq ==
+  scaling_max_freq`, which is exactly what the `kMaximum` profile does.
+- Do not `cycle` for hundreds of seconds in CI: long sustained boost
+  will throttle the device thermally and skew subsequent measurements.
+- Do not change the public API shape (the 4 controller methods, plus
+  `SetThreadAffinity`/`ResetThreadAffinity`) without first updating this
+  file and getting a human review.
+
+---
+
+## 11. Reference: what the s5e9955 (Galaxy Z Flip6 / Exynos 2500) config covers
+
+- 4 CPU policies, mapped to clusters: `little`={0,1}, `mid`={2..6},
+  `big`={7,8}, `prime`={9}. Max freqs: 1.805/2.362/2.746/3.303 GHz.
+- 1 GPU (`/sys/class/devfreq/22200000.sgpu`), 240–999 MHz.
+- 1 DRAM/MIF (`/sys/class/devfreq/17000010.devfreq_mif`, written via
+  `scaling_devfreq_min/max`), 676–4780 MHz.
+- All five named modes plus one custom profile `ml_inference_burst`
+  (id `1001`) that boosts prime+big+gpu+mif and leaves little/mid alone.
+
+This was verified on a real SM-F766B: `probe` reports `missing paths: 0`,
+every freq value in the JSON appears in the device's
+`scaling_available_frequencies`, and `affinity big`/`affinity prime`
+yield `sched_getcpu()` values in the expected sets.

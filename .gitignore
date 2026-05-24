@@ -1,0 +1,26 @@
+build/
+build-*/
+out/
+*.o
+*.a
+*.so
+*.obj
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# CMake junk that occasionally leaks out of build/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# Anything probed-but-temporary
+/tmp_probed*.json
