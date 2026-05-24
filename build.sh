@@ -1,18 +1,19 @@
 #!/usr/bin/env bash
 # Build the FreqControl static library and the freq_ctl CLI for Android.
 #
+# All SoCs declared under include/freq_control/soc/ are compiled in; the
+# active device is picked at runtime via SetActiveDevice or the freq_ctl
+# `--device <name>` flag. There is no build-time SoC selection.
+#
 # Requires the Android NDK. The script picks one in this order:
 #   1. $ANDROID_NDK
 #   2. $ANDROID_NDK_HOME
 #   3. highest-versioned dir under $ANDROID_HOME/ndk/
-#
-# Defaults: arm64-v8a, API 30, FREQ_CONTROL_SOC=s5e9955.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-soc="${FREQ_CONTROL_SOC:-s5e9955}"
 build_dir="build"
 abi="arm64-v8a"
 api="30"
@@ -24,8 +25,6 @@ usage() {
 Usage: $(basename "$0") [options]
 
 Options:
-  -s, --soc <name>        SoC config to compile against (default: $soc).
-                          Must match a file at config/soc/<name>.h.
   -b, --build-dir <dir>   Out-of-tree build directory (default: $build_dir).
   -c, --clean             Remove the build dir before configuring.
   -j, --jobs <N>          Parallel build jobs (default: $jobs).
@@ -34,12 +33,16 @@ Options:
   -h, --help              Show this help.
 
 Required environment: ANDROID_NDK (or ANDROID_NDK_HOME, or ANDROID_HOME/ndk/).
+
+To add a new device:
+    python3 tools/gen_device_config.py --adb-serial <SERIAL>
+then rebuild. The new SoC is appended to the runtime registry and selected
+at runtime via SetActiveDevice / SetActiveDeviceByName.
 EOF
 }
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    -s|--soc)        soc="$2"; shift 2 ;;
     -b|--build-dir)  build_dir="$2"; shift 2 ;;
     -c|--clean)      clean=1; shift ;;
     -j|--jobs)       jobs="$2"; shift 2 ;;
@@ -69,12 +72,12 @@ if [[ ! -f "$toolchain" ]]; then
   exit 1
 fi
 
-soc_header="$SCRIPT_DIR/config/soc/$soc.h"
-if [[ ! -f "$soc_header" ]]; then
+registry="$SCRIPT_DIR/include/freq_control/device_registry.h"
+if [[ ! -f "$registry" ]]; then
   cat >&2 <<EOF
-error: SoC header not found: $soc_header
+error: device registry missing: $registry
   generate it first:
-    python3 tools/gen_device_config.py --adb-serial <SERIAL> -o config/soc/<soc>.h
+    python3 tools/gen_device_config.py --adb-serial <SERIAL>
 EOF
   exit 1
 fi
@@ -88,7 +91,6 @@ fi
 
 echo "configuring:"
 echo "  NDK         $ndk"
-echo "  SOC         $soc"
 echo "  ABI         $abi"
 echo "  API         $api"
 echo "  build dir   $build_dir"
@@ -97,8 +99,7 @@ echo
 cmake -S . -B "$build_dir" \
   -DCMAKE_TOOLCHAIN_FILE="$toolchain" \
   -DANDROID_ABI="$abi" \
-  -DANDROID_PLATFORM="android-$api" \
-  -DFREQ_CONTROL_SOC="$soc"
+  -DANDROID_PLATFORM="android-$api"
 
 echo
 echo "building (-j$jobs)"

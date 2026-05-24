@@ -65,9 +65,16 @@ def _push_binary(serial: str, local_bin: Path) -> None:
     _shell(serial, f"chmod +x {REMOTE_BIN}")
 
 
-def _rails_for_mode(serial: str, mode: str) -> list[tuple[str, str]]:
+def _freq_ctl(serial: str, device: str | None, *args: str) -> str:
+    prefix = f"{REMOTE_BIN} --device {device} " if device else f"{REMOTE_BIN} "
+    return _shell(serial, prefix + " ".join(args))
+
+
+def _rails_for_mode(
+    serial: str, device: str | None, mode: str
+) -> list[tuple[str, str]]:
     """Return [(min_path, max_path), ...] for the requested mode or custom id."""
-    out = _shell(serial, f"{REMOTE_BIN} list")
+    out = _freq_ctl(serial, device, "list")
     rails: list[tuple[str, str]] = []
     in_target = False
     for line in out.splitlines():
@@ -150,6 +157,12 @@ def main() -> int:
         "or a custom id (e.g. 1001) or custom name",
     )
     parser.add_argument(
+        "-D",
+        "--device",
+        default=None,
+        help="SoC name to operate on (default: freq_ctl's first registered device)",
+    )
+    parser.add_argument(
         "-d",
         "--duration",
         type=int,
@@ -172,8 +185,11 @@ def main() -> int:
     if not args.no_push:
         _push_binary(args.serial, args.bin)
 
-    rails = _rails_for_mode(args.serial, args.mode)
-    print(f"mode '{args.mode}' touches {len(rails)} rail(s)")
+    rails = _rails_for_mode(args.serial, args.device, args.mode)
+    print(
+        f"mode '{args.mode}' touches {len(rails)} rail(s)"
+        + (f" on device '{args.device}'" if args.device else "")
+    )
 
     before = _read_snapshot(args.serial, rails)
     _print_snapshot("BEFORE", before)
@@ -182,9 +198,13 @@ def main() -> int:
         f"\napplying via `freq_ctl cycle {args.mode} {args.duration}` "
         f"(SetClocks -> sleep {args.duration}s -> UnsetClocks) ..."
     )
+    cycle_cmd = (
+        f"{REMOTE_BIN} --device {args.device} cycle {args.mode} {args.duration}"
+        if args.device
+        else f"{REMOTE_BIN} cycle {args.mode} {args.duration}"
+    )
     cycle_proc = subprocess.Popen(
-        ["adb", "-s", args.serial, "shell",
-         f"{REMOTE_BIN} cycle {args.mode} {args.duration}"],
+        ["adb", "-s", args.serial, "shell", cycle_cmd],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

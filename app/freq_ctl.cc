@@ -1,11 +1,15 @@
 // Small CLI driver. Useful for manual verification on a device:
 //
-//     freq_ctl list                          # show modes / custom profiles
-//     freq_ctl probe                         # check every sysfs path
-//     freq_ctl set      <mode|id>            # SetFrequencyMode/Id + SetClocks
-//     freq_ctl cycle    <mode|id> <secs>     # apply, sleep, restore - single run
-//     freq_ctl affinity <little|mid|big|prime>
-//     freq_ctl reset-affinity
+//     freq_ctl devices                                    # list compiled-in SoCs
+//     freq_ctl [--device <name>] list                     # show profiles
+//     freq_ctl [--device <name>] probe                    # check sysfs paths
+//     freq_ctl [--device <name>] set      <mode|id>       # SetFrequencyMode/Id + SetClocks
+//     freq_ctl [--device <name>] cycle    <mode|id> <secs>
+//     freq_ctl [--device <name>] affinity <little|mid|big|prime>
+//     freq_ctl [--device <name>] reset-affinity
+//
+// `--device` selects which compiled-in SoC the command operates on. If
+// omitted, the first device in the registry is used.
 
 #include <sys/syscall.h>
 #include <unistd.h>
@@ -137,30 +141,56 @@ int CmdResetAffinity() {
   return 0;
 }
 
+int CmdDevices() {
+  std::printf("compiled-in devices (active: %s):\n",
+              freq_control::GetDeviceConfig().soc_name);
+  for (auto it = freq_control::DeviceRegistryBegin();
+       it != freq_control::DeviceRegistryEnd(); ++it) {
+    std::printf("  [%u] %s\n", static_cast<unsigned>(it->device), it->soc_name);
+  }
+  return 0;
+}
+
 int Usage() {
   std::fprintf(stderr,
                "usage:\n"
-               "  freq_ctl list\n"
-               "  freq_ctl probe\n"
-               "  freq_ctl set            <mode_name|custom_id>\n"
-               "  freq_ctl cycle          <mode_name|custom_id> <seconds>\n"
-               "  freq_ctl affinity       <little|mid|big|prime>\n"
-               "  freq_ctl reset-affinity\n");
+               "  freq_ctl devices\n"
+               "  freq_ctl [--device <name>] list\n"
+               "  freq_ctl [--device <name>] probe\n"
+               "  freq_ctl [--device <name>] set            <mode_name|custom_id>\n"
+               "  freq_ctl [--device <name>] cycle          <mode_name|custom_id> <seconds>\n"
+               "  freq_ctl [--device <name>] affinity       <little|mid|big|prime>\n"
+               "  freq_ctl [--device <name>] reset-affinity\n");
   return 1;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
-  if (argc < 2) return Usage();
-  std::string cmd = argv[1];
-  if (cmd == "list") return CmdList();
-  if (cmd == "probe") return CmdProbe();
-  if (cmd == "set" && argc == 3) return CmdSet(argv[2]);
-  if (cmd == "cycle" && argc == 4) {
-    return CmdCycle(argv[2], static_cast<unsigned>(std::atoi(argv[3])));
+  int i = 1;
+  if (i < argc && std::strcmp(argv[i], "--device") == 0) {
+    if (i + 1 >= argc) {
+      std::fprintf(stderr, "--device requires a SoC name\n");
+      return Usage();
+    }
+    if (!freq_control::SetActiveDeviceByName(argv[i + 1])) {
+      return 1;
+    }
+    i += 2;
   }
-  if (cmd == "affinity" && argc == 3) return CmdAffinity(argv[2]);
-  if (cmd == "reset-affinity" && argc == 2) return CmdResetAffinity();
+  if (i >= argc) return Usage();
+
+  std::string cmd = argv[i++];
+  const int remaining = argc - i;
+
+  if (cmd == "devices" && remaining == 0) return CmdDevices();
+  if (cmd == "list" && remaining == 0) return CmdList();
+  if (cmd == "probe" && remaining == 0) return CmdProbe();
+  if (cmd == "set" && remaining == 1) return CmdSet(argv[i]);
+  if (cmd == "cycle" && remaining == 2) {
+    return CmdCycle(argv[i], static_cast<unsigned>(std::atoi(argv[i + 1])));
+  }
+  if (cmd == "affinity" && remaining == 1) return CmdAffinity(argv[i]);
+  if (cmd == "reset-affinity" && remaining == 0) return CmdResetAffinity();
   return Usage();
 }
