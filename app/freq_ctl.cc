@@ -35,21 +35,34 @@ void PrintRail(const freq_control::RailTarget& t) {
               static_cast<unsigned long long>(t.max_khz));
 }
 
+void PrintTunable(const freq_control::Tunable& t) {
+  if (t.sysfs_path) {
+    std::printf("    tunable %s = %llu (sysfs: %s)\n", t.name,
+                static_cast<unsigned long long>(t.value), t.sysfs_path);
+  } else {
+    std::printf("    tunable %s = %llu (app-readable)\n", t.name,
+                static_cast<unsigned long long>(t.value));
+  }
+}
+
 int CmdList() {
   const auto& cfg = freq_control::GetDeviceConfig();
   std::printf("soc: %s\n", cfg.soc_name);
   std::printf("modes:\n");
   for (size_t i = 0; i < cfg.mode_count; ++i) {
     const auto& m = cfg.modes[i];
-    std::printf("  %s (mode=%u, %zu rails)\n", m.name, static_cast<unsigned>(m.mode),
-                m.target_count);
+    std::printf("  %s (mode=%u, %zu rails, %zu tunables)\n", m.name,
+                static_cast<unsigned>(m.mode), m.target_count, m.tunable_count);
     for (size_t j = 0; j < m.target_count; ++j) PrintRail(m.targets[j]);
+    for (size_t j = 0; j < m.tunable_count; ++j) PrintTunable(m.tunables[j]);
   }
   std::printf("custom:\n");
   for (size_t i = 0; i < cfg.custom_count; ++i) {
     const auto& c = cfg.custom_profiles[i];
-    std::printf("  id=%u name=%s (%zu rails)\n", c.id, c.name, c.target_count);
+    std::printf("  id=%u name=%s (%zu rails, %zu tunables)\n", c.id, c.name, c.target_count,
+                c.tunable_count);
     for (size_t j = 0; j < c.target_count; ++j) PrintRail(c.targets[j]);
+    for (size_t j = 0; j < c.tunable_count; ++j) PrintTunable(c.tunables[j]);
   }
   return 0;
 }
@@ -72,6 +85,9 @@ int CmdProbe() {
     for (size_t j = 0; j < m.target_count; ++j) {
       check(m.targets[j].min_path);
       check(m.targets[j].max_path);
+    }
+    for (size_t j = 0; j < m.tunable_count; ++j) {
+      if (m.tunables[j].sysfs_path != nullptr) check(m.tunables[j].sysfs_path);
     }
   }
   std::printf("missing paths: %d\n", missing);

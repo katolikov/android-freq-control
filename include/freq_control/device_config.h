@@ -18,13 +18,19 @@
 
 namespace freq_control {
 
-// Predefined named frequency profiles. The integer values are stable.
+// Predefined named profiles. The integer values are stable.
+//
+//   kPowerSave    - clocks held low; minimal extras applied
+//   kPerformance  - clocks pinned at the top of each rail; extras applied
+//   kBoost        - same rails as kPerformance plus extras pushed harder
+//
+// "Extras" are scoped to the per-mode tunables table (Tunable[]) and may
+// include sysfs-bound knobs (auto-written by SetClocks/UnsetClocks) and
+// application-readable values (consumed via FreqController::GetTunable).
 enum class FrequencyMode : uint32_t {
   kPowerSave = 0,
-  kBalanced = 1,
-  kPerformance = 2,
-  kBoost = 3,
-  kMaximum = 4,
+  kPerformance = 1,
+  kBoost = 2,
 };
 
 // Logical CPU clusters; per-SoC mapping to kernel CPU ids is in the
@@ -46,12 +52,27 @@ struct RailTarget {
   uint64_t max_khz;
 };
 
+// One additional knob included in a profile. If `sysfs_path` is set,
+// SetClocks reads the current value of that node, saves it, then writes
+// `value`; UnsetClocks restores. If `sysfs_path` is nullptr, the knob is
+// application-readable only: user code consumes `value` via
+// FreqController::GetTunable(name) and applies it however it likes
+// (for example SCHED_CPU_AFFINITY_THREAD_ENN_LIB is a CPU mask that the
+// app feeds to sched_setaffinity itself).
+struct Tunable {
+  const char* name;
+  const char* sysfs_path;
+  uint64_t value;
+};
+
 // A named profile keyed by FrequencyMode.
 struct ModeProfile {
   FrequencyMode mode;
   const char* name;
   const RailTarget* targets;
   size_t target_count;
+  const Tunable* tunables;
+  size_t tunable_count;
 };
 
 // A profile keyed by an opaque uint32_t id. Use these for ad-hoc workloads
@@ -61,6 +82,8 @@ struct CustomProfile {
   const char* name;
   const RailTarget* targets;
   size_t target_count;
+  const Tunable* tunables;
+  size_t tunable_count;
 };
 
 struct CpuClusterMap {

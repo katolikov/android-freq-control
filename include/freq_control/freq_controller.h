@@ -54,6 +54,15 @@ class FreqController {
   // Whether SetClocks() has run and not been followed by UnsetClocks().
   bool clocks_applied() const;
 
+  // Returns true iff the currently-selected profile declares a Tunable
+  // with this name (regardless of whether it is sysfs-bound).
+  bool HasTunable(const char* name) const;
+
+  // Returns the value of the named Tunable in the currently-selected
+  // profile, or `fallback` if no profile is selected or no such Tunable
+  // is declared. Comparison is case-sensitive.
+  uint64_t GetTunable(const char* name, uint64_t fallback = 0) const;
+
  private:
   struct Impl;
   std::unique_ptr<Impl> impl_;

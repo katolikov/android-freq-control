@@ -37,38 +37,13 @@ inline constexpr RailTarget kPowerSaveTargets[] = {
     {kMifMin, kMifMax, 676000ULL, 1539000ULL},
 };
 
-// FrequencyMode::kBalanced (balanced)
-inline constexpr RailTarget kBalancedTargets[] = {
-    {kCpuLittleMin, kCpuLittleMax, 400000ULL, 1344000ULL},
-    {kCpuMidMin, kCpuMidMax, 576000ULL, 1728000ULL},
-    {kCpuBigMin, kCpuBigMax, 768000ULL, 2112000ULL},
-    {kCpuPrimeMin, kCpuPrimeMax, 768000ULL, 2400000ULL},
-    {kGpuMin, kGpuMax, 240000ULL, 682000ULL},
-    {kMifMin, kMifMax, 676000ULL, 2288000ULL},
+inline constexpr Tunable kPowerSaveTunables[] = {
+    {"SCHED_COMMON_TARGET_LATENCY", nullptr, 0ULL},
+    {"MEM_MO_SCEN_ID_CUSTOMIZED", nullptr, 0ULL},
 };
 
 // FrequencyMode::kPerformance (performance)
 inline constexpr RailTarget kPerformanceTargets[] = {
-    {kCpuLittleMin, kCpuLittleMax, 1056000ULL, 1728000ULL},
-    {kCpuMidMin, kCpuMidMax, 1440000ULL, 2208000ULL},
-    {kCpuBigMin, kCpuBigMax, 1632000ULL, 2592000ULL},
-    {kCpuPrimeMin, kCpuPrimeMax, 1920000ULL, 2976000ULL},
-    {kGpuMin, kGpuMax, 557000ULL, 860000ULL},
-    {kMifMin, kMifMax, 1715000ULL, 4205000ULL},
-};
-
-// FrequencyMode::kBoost (boost)
-inline constexpr RailTarget kBoostTargets[] = {
-    {kCpuLittleMin, kCpuLittleMax, 1344000ULL, 1805000ULL},
-    {kCpuMidMin, kCpuMidMax, 1728000ULL, 2362000ULL},
-    {kCpuBigMin, kCpuBigMax, 2112000ULL, 2746000ULL},
-    {kCpuPrimeMin, kCpuPrimeMax, 2400000ULL, 3303000ULL},
-    {kGpuMin, kGpuMax, 682000ULL, 999000ULL},
-    {kMifMin, kMifMax, 2288000ULL, 4780000ULL},
-};
-
-// FrequencyMode::kMaximum (maximum)
-inline constexpr RailTarget kMaximumTargets[] = {
     {kCpuLittleMin, kCpuLittleMax, 1805000ULL, 1805000ULL},
     {kCpuMidMin, kCpuMidMax, 2362000ULL, 2362000ULL},
     {kCpuBigMin, kCpuBigMax, 2746000ULL, 2746000ULL},
@@ -77,12 +52,30 @@ inline constexpr RailTarget kMaximumTargets[] = {
     {kMifMin, kMifMax, 4780000ULL, 4780000ULL},
 };
 
+inline constexpr Tunable kPerformanceTunables[] = {
+    {"SCHED_COMMON_TARGET_LATENCY", nullptr, 1ULL},
+    {"MEM_MO_SCEN_ID_CUSTOMIZED", nullptr, 0ULL},
+};
+
+// FrequencyMode::kBoost (boost)
+inline constexpr RailTarget kBoostTargets[] = {
+    {kCpuLittleMin, kCpuLittleMax, 1805000ULL, 1805000ULL},
+    {kCpuMidMin, kCpuMidMax, 2362000ULL, 2362000ULL},
+    {kCpuBigMin, kCpuBigMax, 2746000ULL, 2746000ULL},
+    {kCpuPrimeMin, kCpuPrimeMax, 3303000ULL, 3303000ULL},
+    {kGpuMin, kGpuMax, 999000ULL, 999000ULL},
+    {kMifMin, kMifMax, 4780000ULL, 4780000ULL},
+};
+
+inline constexpr Tunable kBoostTunables[] = {
+    {"SCHED_COMMON_TARGET_LATENCY", nullptr, 1ULL},
+    {"MEM_MO_SCEN_ID_CUSTOMIZED", nullptr, 1ULL},
+};
+
 inline constexpr ModeProfile kModes[] = {
-    {FrequencyMode::kPowerSave, "power_save", kPowerSaveTargets, std::size(kPowerSaveTargets)},
-    {FrequencyMode::kBalanced, "balanced", kBalancedTargets, std::size(kBalancedTargets)},
-    {FrequencyMode::kPerformance, "performance", kPerformanceTargets, std::size(kPerformanceTargets)},
-    {FrequencyMode::kBoost, "boost", kBoostTargets, std::size(kBoostTargets)},
-    {FrequencyMode::kMaximum, "maximum", kMaximumTargets, std::size(kMaximumTargets)},
+    {FrequencyMode::kPowerSave, "power_save", kPowerSaveTargets, std::size(kPowerSaveTargets), kPowerSaveTunables, std::size(kPowerSaveTunables)},
+    {FrequencyMode::kPerformance, "performance", kPerformanceTargets, std::size(kPerformanceTargets), kPerformanceTunables, std::size(kPerformanceTunables)},
+    {FrequencyMode::kBoost, "boost", kBoostTargets, std::size(kBoostTargets), kBoostTunables, std::size(kBoostTunables)},
 };
 
 inline constexpr uint32_t kClusterLittleCpus[] = {

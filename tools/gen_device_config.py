@@ -28,14 +28,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-# Stable emission order for the five named modes. The right-hand column is
+# Stable emission order for the three named modes. The right-hand column is
 # the C++ enumerator in FrequencyMode that each mode binds to.
 _KNOWN_MODES: list[tuple[str, str]] = [
     ("power_save", "kPowerSave"),
-    ("balanced", "kBalanced"),
     ("performance", "kPerformance"),
     ("boost", "kBoost"),
-    ("maximum", "kMaximum"),
 ]
 
 # Number-of-policies -> cluster labels, ordered low max-freq to high. Samsung's
@@ -51,12 +49,15 @@ _CLUSTER_LABELS_BY_COUNT: dict[int, list[str]] = {
 # (min, max) percentile pair per mode. Indices into the rail's sorted
 # available_frequencies list: 0 = lowest, 1 = highest. Picking by index
 # guarantees the chosen value is one the kernel will accept.
+#
+#   power_save  - cap freqs at a low value (also drops the floor).
+#   performance - pin every rail to the top of its table.
+#   boost       - same rails as performance; the difference lives in the
+#                 per-mode Tunable table (e.g. higher SCHED knobs).
 _MODE_PERCENTILES: dict[str, tuple[float, float]] = {
     "power_save": (0.00, 0.40),
-    "balanced": (0.00, 0.65),
-    "performance": (0.45, 0.90),
-    "boost": (0.65, 1.00),
-    "maximum": (1.00, 1.00),
+    "performance": (1.00, 1.00),
+    "boost": (1.00, 1.00),
 }
 
 _KNOWN_CLUSTER_ENUMS: dict[str, str] = {
@@ -187,6 +188,31 @@ def _probe_devfreq_node(
     return paths, sorted({int(x) for x in freqs_raw})
 
 
+def _build_tunables(mode: str) -> list[tuple[str, str | None, int]]:
+    """Per-mode list of (name, optional sysfs_path, value).
+
+    Names match the well-known Samsung ENN-style knobs. These defaults are
+    a starting point; edit the generated header (or this table) to tune
+    them for a specific workload.
+    """
+    if mode == "power_save":
+        return [
+            ("SCHED_COMMON_TARGET_LATENCY", None, 0),
+            ("MEM_MO_SCEN_ID_CUSTOMIZED", None, 0),
+        ]
+    if mode == "performance":
+        return [
+            ("SCHED_COMMON_TARGET_LATENCY", None, 1),
+            ("MEM_MO_SCEN_ID_CUSTOMIZED", None, 0),
+        ]
+    if mode == "boost":
+        return [
+            ("SCHED_COMMON_TARGET_LATENCY", None, 1),
+            ("MEM_MO_SCEN_ID_CUSTOMIZED", None, 1),
+        ]
+    raise SystemExit(f"no tunable defaults for mode '{mode}'")
+
+
 def probe_device(serial: str, adb: str) -> dict[str, Any]:
     if shutil.which(adb) is None:
         raise SystemExit(f"adb binary not found: {adb}")
@@ -218,9 +244,12 @@ def probe_device(serial: str, adb: str) -> dict[str, Any]:
             modes[mode][rail] = _pick_freq_pair(p["freqs"], mode)
 
     devfreq_ls = _run_adb(serial, adb, "ls /sys/class/devfreq/ 2>/dev/null").split()
-    extra = (("gpu", "sgpu"), ("mif", "mif"))
+    extra = (("gpu", "sgpu"), ("mif", "mif"), ("int", "int"))
     for rail_name, needle in extra:
-        node = next((d for d in devfreq_ls if needle in d.lower()), None)
+        node = next(
+            (d for d in devfreq_ls if f"devfreq_{needle}" in d.lower() or d.lower().endswith(needle)),
+            None,
+        )
         if node is None:
             print(f"probe: no {rail_name} devfreq node found, skipping", file=sys.stderr)
             continue
@@ -237,11 +266,16 @@ def probe_device(serial: str, adb: str) -> dict[str, Any]:
             modes[mode][rail_name] = _pick_freq_pair(freqs, mode)
         print(f"probe: {rail_name}='{node}' ({len(freqs)} freqs)", file=sys.stderr)
 
+    tunables: dict[str, list[tuple[str, str | None, int]]] = {
+        mode: _build_tunables(mode) for mode, _ in _KNOWN_MODES
+    }
+
     return {
         "soc": soc,
         "cpu_clusters": cpu_clusters,
         "rails": rails,
         "modes": modes,
+        "tunables": tunables,
     }
 
 
@@ -274,6 +308,21 @@ def _emit_targets(
         min_const = _rail_constant_name(rail, "Min") if rails[rail].get("min") else "nullptr"
         max_const = _rail_constant_name(rail, "Max") if rails[rail].get("max") else "nullptr"
         out.append(f"    {{{min_const}, {max_const}, {lo}ULL, {hi}ULL}},")
+    out.append("};")
+    out.append("")
+
+
+def _emit_tunables(
+    out: list[str],
+    array_name: str,
+    tunables: list[tuple[str, str | None, int]],
+) -> None:
+    if not tunables:
+        return
+    out.append(f"inline constexpr Tunable {array_name}[] = {{")
+    for name, sysfs_path, value in tunables:
+        path_lit = f'"{sysfs_path}"' if sysfs_path else "nullptr"
+        out.append(f'    {{"{name}", {path_lit}, {value}ULL}},')
     out.append("};")
     out.append("")
 
@@ -323,21 +372,37 @@ def build_header(spec: dict[str, Any]) -> str:
 
     _emit_rail_paths(out, spec["rails"])
 
-    mode_entries: list[tuple[str, str, str]] = []  # (enum_value, label, array_name)
+    tunables_per_mode: dict[str, list[tuple[str, str | None, int]]] = spec.get(
+        "tunables", {}
+    )
+
+    # (enum_value, label, rails_array_name, tunables_array_name_or_None)
+    mode_entries: list[tuple[str, str, str, str | None]] = []
     for label, enum_value in _KNOWN_MODES:
         if label not in spec["modes"]:
             continue
-        array_name = f"k{_to_pascal(label)}Targets"
+        rails_name = f"k{_to_pascal(label)}Targets"
         out.append(f"// FrequencyMode::{enum_value} ({label})")
-        _emit_targets(out, array_name, spec["rails"], spec["modes"][label])
-        mode_entries.append((enum_value, label, array_name))
+        _emit_targets(out, rails_name, spec["rails"], spec["modes"][label])
+        tunables_name: str | None = None
+        if tunables_per_mode.get(label):
+            tunables_name = f"k{_to_pascal(label)}Tunables"
+            _emit_tunables(out, tunables_name, tunables_per_mode[label])
+        mode_entries.append((enum_value, label, rails_name, tunables_name))
 
     if mode_entries:
         out.append("inline constexpr ModeProfile kModes[] = {")
-        for enum_value, label, array_name in mode_entries:
+        for enum_value, label, rails_name, tunables_name in mode_entries:
+            if tunables_name is None:
+                tn = "nullptr"
+                tc = "0"
+            else:
+                tn = tunables_name
+                tc = f"std::size({tunables_name})"
             out.append(
-                f'    {{FrequencyMode::{enum_value}, "{label}", {array_name}, '
-                f"std::size({array_name})}},"
+                f'    {{FrequencyMode::{enum_value}, "{label}", '
+                f"{rails_name}, std::size({rails_name}), "
+                f"{tn}, {tc}}},"
             )
         out.append("};")
         out.append("")

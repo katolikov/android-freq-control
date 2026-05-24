@@ -49,9 +49,31 @@ affinity functions plus the runtime device-selection API:
 | `SetThreadAffinity(cluster, tid=0)`          | `sched_setaffinity(2)` syscall          |
 | `ResetThreadAffinity(tid=0)`                 | `sched_setaffinity(2)` syscall          |
 
-Five frequency modes (in `FrequencyMode`): `kPowerSave`, `kBalanced`,
-`kPerformance`, `kBoost`, `kMaximum`. Four CPU clusters (in
-`CpuCluster`): `kLittle`, `kMid`, `kBig`, `kPrime`.
+Three frequency modes (in `FrequencyMode`):
+
+- `kPowerSave` — clocks held low; minimal extras.
+- `kPerformance` — clocks pinned at the top of each rail; tunable extras
+  applied at moderate values.
+- `kBoost` — same rails as `kPerformance`; tunable extras pushed harder.
+
+Four CPU clusters (in `CpuCluster`): `kLittle`, `kMid`, `kBig`, `kPrime`.
+
+### Per-mode tunables
+
+In addition to CPU/GPU/devfreq rails, each profile carries a list of
+`Tunable { name, sysfs_path, value }` knobs that can be:
+
+- **sysfs-bound** — when `sysfs_path` is non-null the integer `value` is
+  written to that node during `SetClocks()` and restored on `UnsetClocks()`
+  alongside the rails. Use this for vendor `MINLOCK`-style nodes.
+- **application-readable** — when `sysfs_path` is null the value is
+  exposed to your code via `ctl.GetTunable("NAME", fallback)` so you can
+  apply it however you like (e.g. feed a CPU mask to `sched_setaffinity`).
+
+The generator emits sensible defaults for `SCHED_COMMON_TARGET_LATENCY`
+and `MEM_MO_SCEN_ID_CUSTOMIZED`. Extend `_build_tunables` in
+`tools/gen_device_config.py` to add more, or hand-edit the generated
+`include/freq_control/soc/<soc>.h`.
 
 ---
 

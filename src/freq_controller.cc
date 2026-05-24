@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 #include "sysfs_io.h"
@@ -19,6 +20,12 @@ struct SavedRail {
   uint64_t prev_max;  // ignored if max_path is empty
   bool has_min;
   bool has_max;
+};
+
+// One saved tunable value, for sysfs-bound tunables.
+struct SavedTunable {
+  const char* sysfs_path;
+  uint64_t prev_value;
 };
 
 bool PathPresent(const char* p) {
@@ -58,16 +65,21 @@ bool ApplyRail(const RailTarget& target) {
 struct FreqController::Impl {
   const RailTarget* selected_targets = nullptr;
   size_t selected_count = 0;
+  const Tunable* selected_tunables = nullptr;
+  size_t selected_tunable_count = 0;
   const char* selected_name = nullptr;
-  std::vector<SavedRail> saved;
+  std::vector<SavedRail> saved_rails;
+  std::vector<SavedTunable> saved_tunables;
 
   void ClearSelection() {
     selected_targets = nullptr;
     selected_count = 0;
+    selected_tunables = nullptr;
+    selected_tunable_count = 0;
     selected_name = nullptr;
   }
 
-  bool HasSelection() const { return selected_targets != nullptr; }
+  bool HasSelection() const { return selected_targets != nullptr || selected_tunables != nullptr; }
 };
 
 FreqController::FreqController() : impl_(std::make_unique<Impl>()) {}
@@ -84,6 +96,8 @@ bool FreqController::SetFrequencyMode(FrequencyMode mode) {
     if (cfg.modes[i].mode == mode) {
       impl_->selected_targets = cfg.modes[i].targets;
       impl_->selected_count = cfg.modes[i].target_count;
+      impl_->selected_tunables = cfg.modes[i].tunables;
+      impl_->selected_tunable_count = cfg.modes[i].tunable_count;
       impl_->selected_name = cfg.modes[i].name;
       return true;
     }
@@ -99,6 +113,8 @@ bool FreqController::SetFrequencyCustomId(uint32_t id) {
     if (cfg.custom_profiles[i].id == id) {
       impl_->selected_targets = cfg.custom_profiles[i].targets;
       impl_->selected_count = cfg.custom_profiles[i].target_count;
+      impl_->selected_tunables = cfg.custom_profiles[i].tunables;
+      impl_->selected_tunable_count = cfg.custom_profiles[i].tunable_count;
       impl_->selected_name = cfg.custom_profiles[i].name;
       return true;
     }
@@ -113,8 +129,8 @@ bool FreqController::SetClocks() {
     std::fprintf(stderr, "freq_control: SetClocks called without a profile selected\n");
     return false;
   }
-  std::vector<SavedRail> saved;
-  saved.reserve(impl_->selected_count);
+  std::vector<SavedRail> saved_rails;
+  saved_rails.reserve(impl_->selected_count);
   for (size_t i = 0; i < impl_->selected_count; ++i) {
     const RailTarget& t = impl_->selected_targets[i];
     SavedRail s{};
@@ -128,40 +144,84 @@ bool FreqController::SetClocks() {
       s.has_max = ReadSysfsUint64(t.max_path, &s.prev_max);
       if (!s.has_max) return false;
     }
-    saved.push_back(s);
+    saved_rails.push_back(s);
   }
+
+  std::vector<SavedTunable> saved_tunables;
+  saved_tunables.reserve(impl_->selected_tunable_count);
+  for (size_t i = 0; i < impl_->selected_tunable_count; ++i) {
+    const Tunable& t = impl_->selected_tunables[i];
+    if (!PathPresent(t.sysfs_path)) continue;
+    SavedTunable st{};
+    st.sysfs_path = t.sysfs_path;
+    if (!ReadSysfsUint64(t.sysfs_path, &st.prev_value)) return false;
+    saved_tunables.push_back(st);
+  }
+
   for (size_t i = 0; i < impl_->selected_count; ++i) {
     if (!ApplyRail(impl_->selected_targets[i])) {
-      impl_->saved = std::move(saved);
+      impl_->saved_rails = std::move(saved_rails);
+      impl_->saved_tunables = std::move(saved_tunables);
       return false;
     }
   }
-  impl_->saved = std::move(saved);
+  for (size_t i = 0; i < impl_->selected_tunable_count; ++i) {
+    const Tunable& t = impl_->selected_tunables[i];
+    if (!PathPresent(t.sysfs_path)) continue;
+    if (!WriteSysfsUint64(t.sysfs_path, t.value)) {
+      impl_->saved_rails = std::move(saved_rails);
+      impl_->saved_tunables = std::move(saved_tunables);
+      return false;
+    }
+  }
+
+  impl_->saved_rails = std::move(saved_rails);
+  impl_->saved_tunables = std::move(saved_tunables);
   return true;
 }
 
 bool FreqController::UnsetClocks() {
-  if (impl_->saved.empty()) {
+  if (impl_->saved_rails.empty() && impl_->saved_tunables.empty()) {
     std::fprintf(stderr, "freq_control: UnsetClocks called with no saved state\n");
     return false;
   }
   bool ok = true;
-  for (const SavedRail& s : impl_->saved) {
+  for (const SavedRail& s : impl_->saved_rails) {
     RailTarget restore{};
     restore.min_path = s.min_path;
     restore.max_path = s.max_path;
     restore.min_khz = s.has_min ? s.prev_min : 0;
     restore.max_khz = s.has_max ? s.prev_max : 0;
-    if (!ApplyRail(restore)) {
-      ok = false;
-    }
+    if (!ApplyRail(restore)) ok = false;
   }
-  impl_->saved.clear();
+  for (const SavedTunable& s : impl_->saved_tunables) {
+    if (!WriteSysfsUint64(s.sysfs_path, s.prev_value)) ok = false;
+  }
+  impl_->saved_rails.clear();
+  impl_->saved_tunables.clear();
   return ok;
 }
 
 bool FreqController::clocks_applied() const {
-  return !impl_->saved.empty();
+  return !impl_->saved_rails.empty() || !impl_->saved_tunables.empty();
+}
+
+bool FreqController::HasTunable(const char* name) const {
+  if (name == nullptr || impl_->selected_tunables == nullptr) return false;
+  for (size_t i = 0; i < impl_->selected_tunable_count; ++i) {
+    if (std::strcmp(impl_->selected_tunables[i].name, name) == 0) return true;
+  }
+  return false;
+}
+
+uint64_t FreqController::GetTunable(const char* name, uint64_t fallback) const {
+  if (name == nullptr || impl_->selected_tunables == nullptr) return fallback;
+  for (size_t i = 0; i < impl_->selected_tunable_count; ++i) {
+    if (std::strcmp(impl_->selected_tunables[i].name, name) == 0) {
+      return impl_->selected_tunables[i].value;
+    }
+  }
+  return fallback;
 }
 
 }  // namespace freq_control

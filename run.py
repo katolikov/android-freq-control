@@ -32,8 +32,8 @@ LOCAL_BIN_DEFAULT = REPO_ROOT / "build" / "freq_ctl"
 REMOTE_BIN = "/data/local/tmp/freq_ctl"
 
 _RAIL_LINE_RE = re.compile(r"min\[([^\]]+)\]\s*=\s*\d+\s*kHz,\s*max\[([^\]]+)\]")
-_MODE_HEADER_RE = re.compile(r"^  (\S+) \(mode=\d+, \d+ rails\)")
-_CUSTOM_HEADER_RE = re.compile(r"^  id=(\d+) name=(\S+) \(\d+ rails\)")
+_MODE_HEADER_RE = re.compile(r"^  (\S+) \(mode=\d+, \d+ rails(?:, \d+ tunables)?\)")
+_CUSTOM_HEADER_RE = re.compile(r"^  id=(\d+) name=(\S+) \(\d+ rails(?:, \d+ tunables)?\)")
 
 
 def _adb(serial: str, *args: str, capture: bool = True, check: bool = True) -> str:
